@@ -8,11 +8,12 @@
 
 ## 必须包含的字段
 
-每条日志必须包含 `trace_id`：
+每条日志必须包含 `trace_id`，从 Gin 上下文中取出（由 TraceID 中间件注入）：
 
 ```go
 // 正确示例
-logrus.WithContext(ctx).WithFields(logrus.Fields{
+traceID := c.GetString("trace_id")
+logrus.WithFields(logrus.Fields{
     "trace_id": traceID,
     "user_id":  userID,
 }).Info("user login success")

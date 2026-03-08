@@ -26,6 +26,33 @@ paths:
 - `data`：业务数据，失败时可为 null
 - `trace_id`：必须从请求上下文中取出并返回，不得硬编码或省略
 
+## Trace ID 注入
+
+trace_id 必须通过中间件统一注入到 Gin 上下文，Handler 层直接读取，不得自行生成。
+
+**中间件实现规范：**
+
+```go
+// middleware/traceid/middleware.go
+func TraceID() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        traceID := c.GetHeader("X-Request-Id")
+        if traceID == "" {
+            traceID = uuid.NewString() // 客户端未传入时自动生成
+        }
+        c.Set("trace_id", traceID)
+        c.Header("X-Request-Id", traceID) // 写回响应头，方便链路追踪
+        c.Next()
+    }
+}
+```
+
+**注册顺序**（必须在所有业务中间件之前）：
+
+```go
+engine.Use(middleware.TraceID(), gin.Recovery(), ...)
+```
+
 ## Gin Handler 规范
 
 ```go
