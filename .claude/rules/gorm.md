@@ -92,7 +92,7 @@ func (s *UserService) CreateUser(user *domain.User) error {
 ### 事务实现参考
 
 ```go
-// common/infrastructure/postgresql/transaction.go
+// github.com/opensourceways/go-ddd-framework/postgresql/transaction.go
 type contextTxKey struct{}
 
 // ✅ 正确：接收原始 context，保留 trace_id 等信息
@@ -105,7 +105,7 @@ func (impl transactionImpl) Do(ctx context.Context, f func(ctx context.Context) 
 }
 
 // DAO 层从 context 取出事务对象
-func (dao *daoImpl) New(ctx context.Context) *gorm.DB {
+func (dao *daoImpl) New(ctx context.Context) Impl {
     if tx, ok := ctx.Value(contextTxKey{}).(*gorm.DB); ok {
         return tx
     }
@@ -125,7 +125,7 @@ func (dao *daoImpl) GetRecord(ctx context.Context, filter, result interface{}) e
     return dao.WithContext(ctx).Where(filter).First(result).Error
 }
 
-// Repository 层：转换为 common/domain/repository 定义的错误
+// Repository 层：转换为 github.com/opensourceways/go-ddd-framework/repository 定义的错误
 func (impl *userImpl) Find(ctx context.Context, id int64) (*domain.User, error) {
     var do userDO
     do.ID = id

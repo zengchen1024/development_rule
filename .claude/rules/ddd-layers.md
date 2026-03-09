@@ -37,7 +37,7 @@ func (v *Order) Cancel(user *User) error {
         return allerror.New("order_not_cancellable", "only pending orders can be cancelled", nil)
     }
     if v.CreatedBy != user.Id {
-        return allerror.NewNoPermissionError("", nil)
+        return allerror.NewNoPermission("", nil)
     }
     v.Status = StatusCancelled
     return nil

@@ -2,7 +2,7 @@
 
 ## 错误包结构
 
-自定义 error 包位于 `common/domain/allerror`，核心结构如下：
+自定义 error 包来自框架库 `github.com/opensourceways/go-ddd-framework/allerror`，核心结构如下：
 
 ```go
 // 基础实现，不对外暴露
@@ -53,8 +53,8 @@ func IsNotFoundError(err error) bool
 // 无权限 → HTTP 403
 type noPermissionError struct{ errorImpl }
 func (e noPermissionError) NoPermission() {}
-func NewNoPermissionError(msg string, err error) error
-func IsNoPermissionError(err error) bool
+func NewNoPermission(msg string, err error) error
+func IsNoPermission(err error) bool
 
 // 超出限制 → HTTP 400
 type overLimitedError struct{ errorImpl }
