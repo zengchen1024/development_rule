@@ -25,6 +25,7 @@
 详细规则见 `.claude/rules/` 目录：
 
 - [框架库 API 参考](`.claude/rules/framework-api.md`)（**写代码必读**：函数签名、类型定义、初始化方式）
+- [项目目录结构与命名](`.claude/rules/project-layout.md`)（**写代码必读**：目录树、包名、文件名、类型命名）
 - [DDD 分层架构](`.claude/rules/ddd-layers.md`)
 - [技术栈约束](`.claude/rules/tech-stack.md`)
 - [API 设计](`.claude/rules/api-design.md`)

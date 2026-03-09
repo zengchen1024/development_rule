@@ -155,6 +155,36 @@ func (h *OrderHandler) ListOrders(c *gin.Context) {
 - `orderby`：排序字段
 - `order`：排序方向（`ASC` 或 `DESC`，不区分大小写）
 
+## 列表接口响应格式
+
+列表接口的 `data` 字段使用**具名结构体**，不使用裸数组：
+
+```go
+// ✅ 正确：具名字段，包含总数
+type OrdersDTO struct {
+    Orders []OrderInfo `json:"orders"`
+    Total  int64       `json:"total"`
+}
+
+// 响应示例
+{
+  "code": "",
+  "msg": "",
+  "data": {
+    "orders": [...],
+    "total": 100
+  },
+  "trace_id": "abc123"
+}
+
+// ❌ 错误：裸数组（无法携带 total，也无法扩展）
+// "data": [...]
+```
+
+- 列表字段名使用**复数形式**，与资源名一致（`orders`、`erratas`）
+- `total` 字段是否返回由请求参数 `count=true` 控制（使用框架 `ReqToPaginate`）
+- 当 `count=false` 时，`total` 返回 `0`，调用方忽略此值
+
 ## HTTP 状态码使用
 
 遵循 REST 语义，使用 HTTP 状态码反映请求结果：

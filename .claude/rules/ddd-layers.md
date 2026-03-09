@@ -175,15 +175,15 @@ func (s *orderApp) Cancel(ctx context.Context, id int64, user *User) error {
 
 ### 构造函数
 
-App Service 依赖通过构造函数注入，参数类型为接口：
+App Service 依赖通过构造函数注入，参数和返回值均为接口类型：
 
 ```go
+// 返回接口而非具体类型，便于调用方 Mock
 func NewOrderAppService(
-    repo repository.Order,
-    payment PaymentService,
+    repo        repository.Order,
     transaction commonrepo.Transaction,
-) *orderApp {
-    return &orderApp{repo: repo, payment: payment, transaction: transaction}
+) OrderAppService {
+    return &orderApp{repo: repo, transaction: transaction}
 }
 ```
 
@@ -194,12 +194,33 @@ func NewOrderAppService(
 - 请求体结构体使用 `req` 前缀（包私有）：`reqToCreateOrder`
 - 转换方法 `req.toCmd()` 返回 `(Cmd, error)`，负责参数绑定后的值对象验证
 
+### 路由注册规范
+
+路由注册函数定义在 `controller/<module>.go`，命名为 `AddWebRouterFor<Module>Controller`：
+
+```go
+// controller/order.go
+func AddWebRouterForOrderController(
+    r   *gin.RouterGroup,
+    svc app.OrderAppService,
+) {
+    ctl := OrderController{svc: svc}
+
+    r.POST("/v1/orders", ctl.Create)
+    r.DELETE("/v1/orders/:id", ctl.Remove)
+    r.GET("/v1/orders", ctl.List)
+    r.GET("/v1/orders/:id", ctl.Get)
+}
+```
+
+由 `server/router.go` 统一调用各模块的注册函数，不在 `server/` 内直接写路由。
+
 ### Handler 规范
 
-- 必须调用 `ctx.Request.Context()` 传递给 App 层
-- 参数错误：`SendBadRequestBody()` / `SendBadRequestParam()`
-- 业务/系统错误：`SendError()`（内部自动映射 HTTP 状态码）
-- 成功响应：`SendRespOfGet()` / `SendRespOfPost()` / `SendRespOfPut()` / `SendRespOfDelete()`
+- 必须调用 `c.Request.Context()` 传递给 App 层
+- 参数错误：`controller.SendBadRequestBody()` / `controller.SendBadRequestParam()`
+- 业务/系统错误：`controller.SendError()`（内部自动映射 HTTP 状态码）
+- 成功响应：`controller.SendRespOfGet()` / `controller.SendRespOfPost()` / `controller.SendRespOfPut()` / `controller.SendRespOfDelete()`
 
 ### 不得越层
 

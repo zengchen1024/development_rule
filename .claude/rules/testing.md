@@ -41,7 +41,62 @@ func TestGetUser(t *testing.T) {
 }
 ```
 
-- 外部依赖（数据库、HTTP 服务）必须 Mock，不得在单元测试中连接真实服务
+## Mock 规范
+
+### 使用 testify/mock（手写 Mock 结构体）
+
+统一使用 `github.com/stretchr/testify/mock`，**不引入 mockgen / gomock**。
+
+Mock 文件命名为 `mock_<interface>_test.go`，放在与测试文件相同目录：
+
+```go
+// mock_order_repo_test.go
+package app_test
+
+import (
+    "context"
+    "github.com/stretchr/testify/mock"
+)
+
+type mockOrderRepo struct {
+    mock.Mock
+}
+
+func (m *mockOrderRepo) Find(ctx context.Context, id int64) (domain.Order, error) {
+    args := m.Called(ctx, id)
+    return args.Get(0).(domain.Order), args.Error(1)
+}
+
+func (m *mockOrderRepo) Save(ctx context.Context, v *domain.Order) error {
+    args := m.Called(ctx, v)
+    return args.Error(0)
+}
+```
+
+### 使用示例
+
+```go
+func TestCancelOrder(t *testing.T) {
+    repo := new(mockOrderRepo)
+    svc := app.NewOrderAppService(repo, ...)
+
+    order := domain.Order{Id: 1, Status: dp.StatusPending}
+    repo.On("Find", mock.Anything, int64(1)).Return(order, nil)
+    repo.On("Save", mock.Anything, mock.AnythingOfType("*domain.Order")).Return(nil)
+
+    err := svc.Cancel(context.Background(), 1, &testUser)
+    require.NoError(t, err)
+    repo.AssertExpectations(t)
+}
+```
+
+### 测试覆盖率要求
+
+- Domain 层状态机/业务规则：**必须有单元测试**
+- App 层核心用例（Create、Cancel 等）：**必须有单元测试**
+- Controller 层、Repository 实现层：不要求单元测试（集成测试覆盖）
+
+
 
 ## 集成测试
 
