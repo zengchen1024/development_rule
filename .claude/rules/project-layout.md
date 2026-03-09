@@ -341,3 +341,112 @@ type errataApp struct {
     reviewApp *errataReviewApp  // 具体类型
 }
 ```
+
+---
+
+## Repository 实现工厂函数
+
+Repository 实现的工厂函数返回**具体类型指针**（不是接口），同时执行数据库表迁移：
+
+```go
+// infrastructure/repositoryimpl/order.go
+package repositoryimpl
+
+// 返回具体类型，server 层接收后赋值给接口变量
+func NewOrder(dao postgresql.Impl) (*orderImpl, error) {
+    // AutoMigrate 在初始化时执行，确保表结构存在
+    if err := postgresql.AutoMigrate(&orderDO{}); err != nil {
+        return nil, err
+    }
+    return &orderImpl{dao: dao}, nil
+}
+```
+
+在 `server/<module>.go` 中，具体类型自动满足 `repository.Order` 接口：
+
+```go
+repo, err := repositoryimpl.NewOrder(postgresql.DAO(cfg.Order.Repo.TableName))
+if err != nil {
+    return err
+}
+// 赋值给接口类型的字段
+services.orderApp = app.NewOrderAppService(repo, tx)
+```
+
+---
+
+## 启动代码模板
+
+### main.go
+
+```go
+package main
+
+import (
+    "flag"
+    "github.com/sirupsen/logrus"
+    "your-project/server"
+)
+
+func main() {
+    // 1. 解析命令行参数
+    var (
+        port       = flag.Int("port", 8080, "server port")
+        configFile = flag.String("config-file", "config/config.yaml", "config file path")
+    )
+    flag.Parse()
+
+    // 2. 初始化日志（必须在最早）
+    logrus.SetFormatter(&logrus.JSONFormatter{})
+    logrus.SetLevel(logrus.InfoLevel)
+
+    // 3. 启动服务（加载配置 + 初始化依赖 + 启动 HTTP）
+    if err := server.Start(*port, *configFile); err != nil {
+        logrus.WithField("error", err.Error()).Fatal("server start failed")
+    }
+}
+```
+
+### server/gin.go（Gin 引擎与中间件初始化）
+
+```go
+package server
+
+import (
+    "github.com/gin-gonic/gin"
+    "github.com/opensourceways/go-ddd-framework/controller/middleware/traceid"
+    "github.com/opensourceways/go-ddd-framework/controller/middleware/ratelimiter"
+    "github.com/opensourceways/go-ddd-framework/controller/middleware/securityheader"
+)
+
+func newGinEngine(cfg *config.Config) *gin.Engine {
+    engine := gin.New()
+
+    // 中间件注册顺序（固定，不得随意调整）
+    engine.Use(
+        gin.Recovery(),                            // 1. 必须第一：捕获 panic
+        traceid.TraceID(),                         // 2. 注入 trace_id
+        logRequest(),                              // 3. 请求日志
+        ratelimiter.Handler(),                     // 4. 限流（需提前调用 ratelimiter.Init）
+        securityheader.SetNormalAPIRespHeader,     // 5. 安全响应头
+    )
+
+    return engine
+}
+
+// logRequest：记录每个请求的基本信息
+func logRequest() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        c.Next()
+
+        traceID := c.GetString("trace_id")
+        logrus.WithFields(logrus.Fields{
+            "trace_id":    traceID,
+            "method":      c.Request.Method,
+            "path":        c.Request.URL.Path,
+            "status_code": c.Writer.Status(),
+        }).Info("request completed")
+    }
+}
+```
+

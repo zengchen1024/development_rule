@@ -28,18 +28,58 @@ Controller 层  →  App 层  →  Domain 层  ←  Infrastructure 层
 
 - 所有状态变更必须通过聚合根的方法完成，外部不得直接修改字段
 - 聚合根方法负责校验前置条件，不满足时返回业务错误
-- 通过工厂函数创建新实体，隐藏初始状态细节
+- 通过工厂函数创建新实体，使用哨兵 ID（`-1`）标识未持久化状态
+
+```go
+// domain/order.go
+const invalidId = int64(-1)
+
+type Order struct {
+    Id        int64
+    Status    string
+    Version   int       // 乐观锁，必须有
+    CreatedAt time.Time
+}
+
+// 新实体工厂函数：返回值类型（非指针），Id 用哨兵值 -1
+func NewOrder(cmd *app.CmdToCreateOrder) Order {
+    return Order{
+        Id:        invalidId,
+        Status:    dp.StatusPending,
+        CreatedAt: time.Now(),
+    }
+}
+
+// 判断是否未持久化（新建实体）
+func (v *Order) IsNew() bool {
+    return v.Id < 0
+}
+```
+
+Repository 实现层根据 `IsNew()` 决定执行 INSERT 还是 UPDATE：
+
+```go
+func (impl *orderImpl) Save(ctx context.Context, v *domain.Order) error {
+    do := toOrderDO(v)
+    dao := impl.dao.New(ctx)
+    if v.IsNew() {
+        return dao.WithContext(ctx).Create(&do).Error
+    }
+    // 乐观锁更新
+    // ...
+}
+```
 
 ```go
 // ✅ 正确：状态转移和规则在聚合根方法中
 func (v *Order) Cancel(user *User) error {
-    if v.Status != StatusPending {
+    if v.Status != dp.StatusPending {
         return allerror.New("order_not_cancellable", "only pending orders can be cancelled", nil)
     }
     if v.CreatedBy != user.Id {
         return allerror.NewNoPermission("", nil)
     }
-    v.Status = StatusCancelled
+    v.Status = dp.StatusCancelled
     return nil
 }
 
@@ -165,6 +205,7 @@ func (s *orderApp) Cancel(ctx context.Context, id int64, user *User) error {
 | 类型 | 命名 | 示例 |
 |------|------|------|
 | 输入命令对象 | `CmdToXxx` | `CmdToCreateOrder` |
+| 列表查询命令 | `CmdToListXxx = repository.ListOpt`（类型别名） | `CmdToListOrders = repository.ListOpt` |
 | 单实体输出 | `XxxDTO` | `OrderDTO` |
 | 操作特定输出 | `XxxResultDTO` | `CreateOrderResultDTO` |
 | 列表输出 | `XxxsDTO` | `OrdersDTO` |
@@ -172,6 +213,68 @@ func (s *orderApp) Cancel(ctx context.Context, id int64, user *User) error {
 | 实体→DTO 转换 | `toXxxDTO(v)` | `toOrderDTO(v)` |
 
 > `XxxResultDTO` 用于创建/更新操作的响应体与查询响应体结构不同时，相同时可直接复用 `XxxDTO`。
+
+### `toXxxDTO` 函数位置
+
+转换函数定义在 `app/dto.go` 中，作为**包级函数**（不是方法）：
+
+```go
+// app/dto.go
+package app
+
+type OrderDTO struct {
+    Id     int64  `json:"id"`
+    Status string `json:"status"`
+    // ...
+}
+
+// 包级转换函数，在 App Service 方法内调用
+func toOrderDTO(v *domain.Order) OrderDTO {
+    return OrderDTO{
+        Id:     v.Id,
+        Status: v.Status,
+    }
+}
+```
+
+### 列表查询类型（`ListOpt` 和 `XxxInfo`）
+
+列表查询相关类型定义在 `domain/repository/` 包：
+
+```go
+// domain/repository/repo.go
+package repository
+
+// ListOpt：列表查询条件，内嵌 dp.Pagination
+type ListOpt struct {
+    Status string
+    Type   string
+    // 其他业务过滤字段...
+
+    dp.Pagination  // 内嵌分页参数
+}
+
+// XxxInfo：列表条目精简结构（只含列表展示需要的字段，非完整聚合根）
+type OrderInfo struct {
+    Id     int64
+    Status string
+    // 只包含列表需要的字段，不包含详情字段
+}
+
+type Order interface {
+    Find(ctx context.Context, id int64) (domain.Order, error)
+    Save(ctx context.Context, v *domain.Order) error
+    Delete(ctx context.Context, v *domain.Order) error
+    List(ctx context.Context, opt *ListOpt) ([]OrderInfo, int64, error)
+}
+```
+
+App 层的 `CmdToListXxx` 使用类型别名，直接复用 `repository.ListOpt`：
+
+```go
+// app/dto.go
+type CmdToListOrders = repository.ListOpt  // 类型别名，非新类型
+```
 
 ### 构造函数
 
