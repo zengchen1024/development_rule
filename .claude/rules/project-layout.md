@@ -386,69 +386,213 @@ package main
 
 import (
     "flag"
+    "time"
+
     "github.com/sirupsen/logrus"
+    "your-project/config"
     "your-project/server"
 )
 
 func main() {
     // 1. 解析命令行参数
     var (
-        port       = flag.Int("port", 8080, "server port")
-        configFile = flag.String("config-file", "config/config.yaml", "config file path")
+        port        = flag.Int("port", 8080, "server port")
+        configFile  = flag.String("config-file", "config/config.yaml", "config file path")
+        tlsCertFile = flag.String("tls-cert-file", "", "TLS cert file path (empty = HTTP)")
+        tlsKeyFile  = flag.String("tls-key-file", "", "TLS key file path")
+        removeCfg   = flag.Bool("remove-config", false, "remove config file after loading")
+        gracePeriod = flag.Duration("grace-period", 180*time.Second, "graceful shutdown period")
     )
     flag.Parse()
 
-    // 2. 初始化日志（必须在最早）
+    // 2. 初始化日志（必须最先执行）
     logrus.SetFormatter(&logrus.JSONFormatter{})
     logrus.SetLevel(logrus.InfoLevel)
 
-    // 3. 启动服务（加载配置 + 初始化依赖 + 启动 HTTP）
-    if err := server.Start(*port, *configFile); err != nil {
-        logrus.WithField("error", err.Error()).Fatal("server start failed")
+    // 3. 加载配置
+    var cfg config.Config
+    if err := config.LoadConfig(*configFile, &cfg, *removeCfg); err != nil {
+        logrus.WithField("error", err.Error()).Fatal("load config failed")
+    }
+
+    // 4. 启动服务（含优雅关闭）
+    server.StartWebServer(&server.ServerOptions{
+        Port:        *port,
+        Cert:        *tlsCertFile,
+        Key:         *tlsKeyFile,
+        RemoveCfg:   *removeCfg,
+        GracePeriod: *gracePeriod,
+    }, &cfg)
+}
+```
+
+### config/config.go（配置加载）
+
+Config 加载三步：读文件 → 设默认值 → 校验。
+
+```go
+package config
+
+import (
+    "os"
+
+    commoncfg "your-project/common/config"
+    "gopkg.in/yaml.v3"
+)
+
+// LoadConfig 从 YAML 文件加载配置，remove=true 时加载后删除文件（用于 K8s Secret 挂载场景）
+func LoadConfig(path string, cfg *Config, remove bool) error {
+    if remove {
+        defer os.Remove(path)
+    }
+
+    b, err := os.ReadFile(path)
+    if err != nil {
+        return err
+    }
+    if err := yaml.Unmarshal(b, cfg); err != nil {
+        return err
+    }
+
+    commoncfg.SetDefault(cfg)   // 递归调用各子配置的 SetDefault()
+    return commoncfg.Validate(cfg) // 递归调用各子配置的 Validate()
+}
+
+type Config struct {
+    Errata            errata.Config   `json:"errata"`
+    ReadHeaderTimeout int             `json:"read_header_timeout"`
+    // 其他模块配置...
+}
+
+// ConfigItems 返回所有子配置指针，供 SetDefault/Validate 递归处理
+func (cfg *Config) ConfigItems() []interface{} {
+    return []interface{}{
+        &cfg.Errata,
+        // 其他子配置...
+    }
+}
+
+// SetDefault 设置顶层配置默认值
+func (cfg *Config) SetDefault() {
+    if cfg.ReadHeaderTimeout <= 0 {
+        cfg.ReadHeaderTimeout = 10
     }
 }
 ```
 
-### server/gin.go（Gin 引擎与中间件初始化）
+各模块子配置同样实现 `SetDefault()` 和 `Validate()` 方法（按需）。
+
+### server/gin.go（启动与优雅关闭）
 
 ```go
 package server
 
 import (
+    "crypto/tls"
+    "fmt"
+    "net/http"
+    "os"
+    "strings"
+    "time"
+
     "github.com/gin-gonic/gin"
-    "github.com/opensourceways/go-ddd-framework/controller/middleware/traceid"
+    "github.com/opensourceways/server-common-lib/interrupts"
     "github.com/opensourceways/go-ddd-framework/controller/middleware/ratelimiter"
     "github.com/opensourceways/go-ddd-framework/controller/middleware/securityheader"
+    "github.com/opensourceways/go-ddd-framework/controller/middleware/traceid"
+    "github.com/sirupsen/logrus"
+    "your-project/config"
 )
 
-func newGinEngine(cfg *config.Config) *gin.Engine {
+type ServerOptions struct {
+    Port        int
+    Cert        string           // TLS 证书路径，空字符串表示使用 HTTP
+    Key         string           // TLS 私钥路径
+    RemoveCfg   bool             // 启动后删除证书文件（K8s Secret 场景）
+    GracePeriod time.Duration    // 优雅关闭等待时长，建议 180s
+}
+
+func (opt *ServerOptions) needTLS() bool {
+    return opt.Key != "" && opt.Cert != ""
+}
+
+// StartWebServer 初始化服务并启动，内置优雅关闭
+func StartWebServer(opt *ServerOptions, cfg *config.Config) {
+    services, err := initServices(cfg)
+    if err != nil {
+        logrus.Error(err)
+        return
+    }
+    defer exitService() // 关闭数据库连接等资源
+
     engine := gin.New()
+    engine.UseRawPath = true
 
     // 中间件注册顺序（固定，不得随意调整）
     engine.Use(
-        gin.Recovery(),                            // 1. 必须第一：捕获 panic
-        traceid.TraceID(),                         // 2. 注入 trace_id
-        logRequest(),                              // 3. 请求日志
-        ratelimiter.Handler(),                     // 4. 限流（需提前调用 ratelimiter.Init）
-        securityheader.SetNormalAPIRespHeader,     // 5. 安全响应头
+        gin.Recovery(),                          // 1. 必须第一：捕获 panic
+        traceid.TraceID(),                       // 2. 注入 trace_id
+        logRequest(),                            // 3. 请求日志
+        ratelimiter.Handler(),                   // 4. 限流
+        securityheader.SetNormalAPIRespHeader,   // 5. 安全响应头
     )
 
-    return engine
+    setRouters(engine.Group("/"), cfg, &services)
+
+    srv := &http.Server{
+        Addr:              fmt.Sprintf(":%d", opt.Port),
+        Handler:           engine,
+        ReadHeaderTimeout: time.Duration(cfg.ReadHeaderTimeout) * time.Second,
+    }
+
+    // 注册优雅关闭：等待 SIGTERM/SIGINT 后在 GracePeriod 内完成在途请求
+    defer interrupts.WaitForGracefulShutdown()
+
+    if !opt.needTLS() {
+        interrupts.ListenAndServe(srv, opt.GracePeriod)
+        return
+    }
+
+    srv.TLSConfig = &tls.Config{
+        MinVersion:               tls.VersionTLS12,
+        PreferServerCipherSuites: true,
+        CipherSuites: []uint16{
+            tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        },
+    }
+    interrupts.ListenAndServeTLS(srv, opt.Cert, opt.Key, opt.GracePeriod)
+
+    // 启动后删除证书文件（仅 K8s Secret 挂载场景需要）
+    if opt.RemoveCfg {
+        time.Sleep(3 * time.Second) // 等待服务完成 TLS 握手后再删
+        _ = os.Remove(opt.Cert)
+        _ = os.Remove(opt.Key)
+    }
 }
 
-// logRequest：记录每个请求的基本信息
+// logRequest 记录每个请求的基本信息，心跳请求不记录
 func logRequest() gin.HandlerFunc {
     return func(c *gin.Context) {
+        traceID := c.GetString("trace_id")
+        start := time.Now()
         c.Next()
 
-        traceID := c.GetString("trace_id")
+        // 心跳检查请求不记录，避免日志噪音
+        if strings.Contains(c.Request.RequestURI, "/v1/heartbeat") {
+            return
+        }
+
         logrus.WithFields(logrus.Fields{
-            "trace_id":    traceID,
-            "method":      c.Request.Method,
-            "path":        c.Request.URL.Path,
-            "status_code": c.Writer.Status(),
+            "trace_id": traceID,
+            "status":   c.Writer.Status(),
+            "duration": time.Since(start).Milliseconds(),
+            "method":   c.Request.Method,
+            "uri":      c.Request.RequestURI,
         }).Info("request completed")
     }
 }
 ```
+
+> `interrupts.WaitForGracefulShutdown()` 监听 SIGTERM/SIGINT，收到信号后等待 `GracePeriod` 内所有在途请求处理完毕再退出。K8s 的 `terminationGracePeriodSeconds` 应大于此值。
 

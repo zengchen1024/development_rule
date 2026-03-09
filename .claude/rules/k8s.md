@@ -48,14 +48,14 @@ resources:
 # 健康检查
 livenessProbe:
   httpGet:
-    path: /healthz
+    path: /v1/heartbeat
     port: 8080
   initialDelaySeconds: 10
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
-    path: /readyz
+    path: /v1/heartbeat
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 5
@@ -63,7 +63,9 @@ readinessProbe:
 
 - 每个 Deployment 必须设置 `resources.requests` 和 `resources.limits`
 - 必须配置 `livenessProbe` 和 `readinessProbe`
-- 必须设置 `terminationGracePeriodSeconds`（建议 30s）
+- 必须设置 `terminationGracePeriodSeconds`（建议 180s，**必须大于代码端 `GracePeriod` 参数**）
+
+> **优雅关闭说明**：K8s 发送 SIGTERM 后等待 `terminationGracePeriodSeconds` 秒，超时强制 SIGKILL。代码端通过 `interrupts.WaitForGracefulShutdown()` 在 `GracePeriod` 内等待在途请求完成。两者关系：`terminationGracePeriodSeconds` > `GracePeriod` + 预留 buffer（建议 30s）。
 
 ### 配置和密钥管理
 
