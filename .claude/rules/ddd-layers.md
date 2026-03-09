@@ -56,19 +56,38 @@ func (v *Order) IsNew() bool {
 }
 ```
 
-Repository 实现层根据 `IsNew()` 决定执行 INSERT 还是 UPDATE：
+Repository 实现层根据 `IsNew()` 决定执行 INSERT 还是 UPDATE，**INSERT 后必须回写数据库生成的 ID**：
 
 ```go
 func (impl *orderImpl) Save(ctx context.Context, v *domain.Order) error {
     do := toOrderDO(v)
     dao := impl.dao.New(ctx)
+
     if v.IsNew() {
-        return dao.WithContext(ctx).Create(&do).Error
+        err := dao.WithContext(ctx).Create(&do).Error
+        if err != nil {
+            return err
+        }
+        v.Id = do.ID  // 回写数据库生成的 ID 到 domain 对象
+        return nil
     }
-    // 乐观锁更新
-    // ...
+
+    // 乐观锁更新：Version + 1，通过 RowsAffected 检测并发冲突
+    do.Version = v.Version + 1
+    r := dao.WithContext(ctx).Model(&orderDO{}).
+        Where("id = ? AND version = ?", v.Id, v.Version).
+        Updates(&do)
+    if r.Error != nil {
+        return r.Error
+    }
+    if r.RowsAffected == 0 {
+        return repository.NewErrorConcurrentUpdating(errors.New("concurrent updating"))
+    }
+    return nil
 }
 ```
+
+> 注意：UPDATE 时 Version 字段自增（存入数据库），但不回写到 domain 对象（调用方通常不再使用该实体）。
 
 ```go
 // ✅ 正确：状态转移和规则在聚合根方法中
@@ -296,6 +315,40 @@ func NewOrderAppService(
 
 - 请求体结构体使用 `req` 前缀（包私有）：`reqToCreateOrder`
 - 转换方法 `req.toCmd()` 返回 `(Cmd, error)`，负责参数绑定后的值对象验证
+
+### reqToList.toCmd() 模式
+
+列表查询的请求结构体内嵌分页和排序参数，`toCmd()` 中组合三类参数：
+
+```go
+// controller/request.go
+type reqToListOrders struct {
+    controller.ReqToPaginate       // 分页参数
+    controller.ReqToOrder          // 排序参数
+    Status string `form:"status"`  // 业务过滤参数
+    Type   string `form:"type"`
+}
+
+func (req *reqToListOrders) toCmd() (cmd app.CmdToListOrders, err error) {
+    // 1. 分页：使用模块级 PaginationConfig 验证边界
+    cmd.Pagination = req.ToPagination(&config.PaginationConfig)
+
+    // 2. 排序：验证字段合法性（框架内部防 SQL 注入）
+    if cmd.Order, err = req.ToOrder(); err != nil {
+        return
+    }
+
+    // 3. 业务过滤字段：通过值对象构造函数验证
+    if req.Status != "" {
+        if cmd.Status, err = dp.NewStatus(req.Status); err != nil {
+            return
+        }
+    }
+    return
+}
+```
+
+> `config.PaginationConfig` 定义在 `controller/config.go` 中，包含 `MaxPageNum` 和 `MaxCountPerPage` 限制。
 
 ### 路由注册规范
 

@@ -34,6 +34,8 @@ paths:
     │   │   └── <concept>.go         # 如 status.go、email.go
     │   ├── event/                   # 领域事件（有消息发布时才创建）
     │   │   └── event.go
+    │   ├── service/                 # 领域服务（跨聚合操作，按需创建）
+    │   │   └── <service>.go
     │   └── repository/
     │       └── repo.go              # Repository 接口定义
     ├── app/
