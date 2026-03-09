@@ -23,6 +23,7 @@
 
 详细规则见 `.claude/rules/` 目录：
 
+- [DDD 分层架构](`.claude/rules/ddd-layers.md`)
 - [技术栈约束](`.claude/rules/tech-stack.md`)
 - [API 设计](`.claude/rules/api-design.md`)
 - [日志规范](`.claude/rules/logging.md`)
