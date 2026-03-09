@@ -27,5 +27,6 @@
 - [API 设计](`.claude/rules/api-design.md`)
 - [日志规范](`.claude/rules/logging.md`)
 - [错误处理](`.claude/rules/error-handling.md`)
+- [GORM 操作](`.claude/rules/gorm.md`)
 - [测试规范](`.claude/rules/testing.md`)
 - [K8s 部署](`.claude/rules/k8s.md`)
