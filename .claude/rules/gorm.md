@@ -120,7 +120,7 @@ func (dao *daoImpl) New(ctx context.Context) Impl {
 **DAO 层 → Repository 层 → App 层**，每层负责不同的错误转换：
 
 ```go
-// DAO 层：直接返回 GORM 原始错误
+// DAO 层：直接返回 GORM 原始错误（不做转换）
 func (dao *daoImpl) GetRecord(ctx context.Context, filter, result interface{}) error {
     return dao.WithContext(ctx).Where(filter).First(result).Error
 }
@@ -140,6 +140,19 @@ func (impl *userImpl) Find(ctx context.Context, id int64) (*domain.User, error) 
     return do.toDomain(), nil
 }
 
+// Repository 层：重复创建错误检测（使用 dao.IsRecordExists）
+func (impl *userImpl) Add(ctx context.Context, v *domain.User) error {
+    do := toUserDO(v)
+    dao := impl.dao.New(ctx)
+    if err := dao.WithContext(ctx).Create(&do).Error; err != nil {
+        if impl.dao.IsRecordExists(err) { // 检测 UNIQUE 约束冲突
+            return repository.NewErrorDuplicateCreating(err)
+        }
+        return err
+    }
+    return nil
+}
+
 // App 层：转换为 allerror 定义的业务错误
 func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, error) {
     user, err := s.repo.Find(ctx, id)
@@ -157,7 +170,7 @@ func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, erro
 
 **分层职责**：
 - **DAO 层**：只负责数据库操作，返回 GORM 原始错误
-- **Repository 层**：转换为领域层通用错误（`ErrorResourceNotFound`、`ErrorDuplicateCreating`、`ErrorConcurrentUpdating`）
+- **Repository 层**：转换为领域层通用错误（`ErrorResourceNotFound`、`ErrorDuplicateCreating`、`ErrorConcurrentUpdating`）；使用 `dao.IsRecordExists(err)` 检测 UNIQUE 冲突
 - **App 层**：转换为业务错误（`allerror`），添加业务错误码和用户友好的错误信息
 
 ## 并发控制规范
@@ -196,28 +209,27 @@ func (impl *userImpl) Save(ctx context.Context, v *domain.User) error {
 
 ## 分页查询规范
 
+使用框架提供的 `postgresql.Offset()` 函数计算偏移量，参数校验由 Controller 层的 `ReqToPaginate.ToPagination()` 完成：
+
 ```go
-func (impl *userImpl) List(ctx context.Context, opt *repository.ListOpt) ([]domain.User, int64, error) {
-    // 参数校验
-    if opt.PageNum <= 0 {
-        opt.PageNum = 1
-    }
-    if opt.CountPerPage <= 0 || opt.CountPerPage > 100 {
-        opt.CountPerPage = 20
-    }
+func (impl *userImpl) List(ctx context.Context, opt *dp.Pagination) ([]domain.User, int64, error) {
+    dao := impl.dao.New(ctx)
+    query := dao.WithContext(ctx).Model(&userDO{})
 
-    query := impl.dao.WithContext(ctx)
-
-    // 先查总数
+    // 先查总数（按需，由 opt.Count 决定）
     var total int64
-    if err := query.Model(&userDO{}).Count(&total).Error; err != nil {
-        return nil, 0, err
+    if opt.Count {
+        if err := query.Count(&total).Error; err != nil {
+            return nil, 0, err
+        }
     }
 
     // 再查分页数据
     var dos []userDO
-    offset := (opt.PageNum - 1) * opt.CountPerPage
-    err := query.Offset(offset).Limit(opt.CountPerPage).Find(&dos).Error
+    err := query.
+        Offset(postgresql.Offset(opt.PageNum, opt.CountPerPage)).
+        Limit(opt.CountPerPage).
+        Find(&dos).Error
 
     users := make([]domain.User, len(dos))
     for i := range dos {
@@ -227,28 +239,36 @@ func (impl *userImpl) List(ctx context.Context, opt *repository.ListOpt) ([]doma
 }
 ```
 
-- 必须校验 `PageNum` 和 `CountPerPage`，防止负数或过大值
-- 建议设置 `CountPerPage` 上限（如 100）
+- 不得在 Repository 层重复校验 `PageNum` 和 `CountPerPage`，这由 Controller 层的 `ToPagination()` 负责
 - `Count()` 和 `Find()` 分开执行，避免 GORM 内部优化失效
 
-## 连接池配置规范
+## 数据库初始化与连接池配置
+
+通过 `postgresql.Config` 统一配置，不得手动调用 `sqlDb.SetMaxOpenConns()` 等方法：
 
 ```go
-// 初始化时配置连接池
-sqlDb, err := dbInstance.DB()
-if err != nil {
-    return nil, err
+// 配置项（通常从 YAML 配置文件读取）
+cfg := postgresql.Config{
+    Host:    "localhost",
+    Port:    5432,
+    User:    "app",
+    Pwd:     "secret",
+    Name:    "mydb",
+    MaxConn: 500, // 最大连接数，默认 500
+    MaxIdle: 250, // 最大空闲连接，默认 250
+    Life:    2,   // 连接生命周期（分钟），默认 2
+    Debug:   false,
 }
 
-sqlDb.SetMaxOpenConns(500)           // 最大连接数
-sqlDb.SetMaxIdleConns(250)           // 最大空闲连接数
-sqlDb.SetConnMaxLifetime(2 * time.Minute) // 连接最大生命周期
+if err := postgresql.Init(&cfg, true); err != nil {
+    return err
+}
 ```
 
 **推荐值**（根据实际负载调整）：
-- `MaxOpenConns`：500（高并发场景）
-- `MaxIdleConns`：MaxOpenConns 的 50%
-- `ConnMaxLifetime`：2-5 分钟（避免数据库主动断开连接）
+- `MaxConn`：500（高并发场景）
+- `MaxIdle`：MaxConn 的 50%
+- `Life`：2-5 分钟（避免数据库主动断开连接）
 
 ## 禁止行为
 

@@ -8,9 +8,10 @@
 - **Web 框架**：Gin
 - **日志**：logrus
 - **ORM**：GORM v2
-- **错误处理**：团队自定义 error 包（见各项目 `pkg/errors` 或 `internal/errors`）
+- **错误处理**：`github.com/opensourceways/go-ddd-framework/allerror`
 - **配置**：手动解析 YAML/JSON 配置文件
 - **部署**：Kubernetes
+- **框架库**：`github.com/opensourceways/go-ddd-framework`（Controller 响应、中间件、PostgreSQL DAO、Repository 错误、分页等）
 
 ## 核心原则
 
@@ -23,6 +24,7 @@
 
 详细规则见 `.claude/rules/` 目录：
 
+- [框架库 API 参考](`.claude/rules/framework-api.md`)（**写代码必读**：函数签名、类型定义、初始化方式）
 - [DDD 分层架构](`.claude/rules/ddd-layers.md`)
 - [技术栈约束](`.claude/rules/tech-stack.md`)
 - [API 设计](`.claude/rules/api-design.md`)

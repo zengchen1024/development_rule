@@ -70,7 +70,7 @@ func New(code, msg string, err error) error
 
 ## Repository 层错误处理
 
-Repository 层返回以下底层错误类型，不使用 allerror 包：
+Repository 层返回以下底层错误类型（来自 `go-ddd-framework/repository` 包），不使用 allerror：
 
 ```go
 type ErrorResourceNotFound struct{ error }
@@ -78,64 +78,89 @@ type ErrorDuplicateCreating struct{ error }
 type ErrorConcurrentUpdating struct{ error }
 ```
 
-App 层（或 Domain 层）负责将底层错误**显式转换**为业务错误：
+App 层负责将底层错误**显式转换**为业务错误：
 
 ```go
-// 正确：显式转换，保留调用链
-func (s *UserService) GetUser(id int64) (*User, error) {
-    user, err := s.repo.Find(id)
+// ✅ 正确：显式转换，保留调用链
+func (s *UserService) CreateUser(ctx context.Context, v *domain.User) error {
+    err := s.repo.Add(ctx, v)
+    if err != nil {
+        if repository.IsErrorDuplicateCreating(err) {
+            return allerror.New(ErrorCodeUserAlreadyExists, "", err)
+        }
+        return allerror.New("user_create_failed", "", err)
+    }
+    return nil
+}
+
+func (s *UserService) UpdateUser(ctx context.Context, v *domain.User) error {
+    err := s.repo.Save(ctx, v)
+    if err != nil {
+        if repository.IsErrorConcurrentUpdating(err) {
+            // 并发冲突属于业务异常，返回 400
+            return allerror.New("user_concurrent_update", "please retry", err)
+        }
+        return allerror.New("user_update_failed", "", err)
+    }
+    return nil
+}
+
+func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, error) {
+    user, err := s.repo.Find(ctx, id)
     if err != nil {
         if repository.IsErrorResourceNotFound(err) {
-            return nil, allerror.NewNotFoundError(
-                allerror.ErrorCodeUserNotFound, "", err,
-            )
+            return nil, allerror.NewNotFoundError(ErrorCodeUserNotFound, "", err)
         }
         return nil, allerror.New("user_query_failed", "", err)
     }
     return user, nil
 }
 
-// 禁止：直接透传底层错误
-func (s *UserService) GetUser(id int64) (*User, error) {
-    return s.repo.Find(id) // 不要这样
+// ❌ 禁止：直接透传底层错误
+func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, error) {
+    return s.repo.Find(ctx, id) // 不要这样
 }
 ```
 
+**三类底层错误的业务映射：**
+
+| 底层错误 | 含义 | allerror 类型 | HTTP |
+|----------|------|--------------|------|
+| `ErrorResourceNotFound` | 数据不存在 | `NewNotFoundError` | 404 |
+| `ErrorDuplicateCreating` | 唯一约束冲突 | `New`（业务码） | 400 |
+| `ErrorConcurrentUpdating` | 乐观锁冲突 | `New`（业务码） | 400 |
+
 ## Controller 层错误响应
 
-Controller 统一调用 `SendError()`，内部通过 `errors.As()` 映射 HTTP 状态码：
+Controller 统一调用 `controller.SendError()`，内部自动映射 HTTP 状态码：
 
-```go
-// HTTP 状态码映射规则
-func httpStatusCode(err error) int {
-    if errors.As(err, &notFoundError{}) {
-        return http.StatusNotFound  // 404
-    }
-    if errors.As(err, &noPermissionError{}) {
-        return http.StatusForbidden // 403
-    }
-    if errors.As(err, &errorCode(nil)) {
-        return http.StatusBadRequest // 400：其他已知业务错误
-    }
-    return http.StatusInternalServerError // 500：未预期错误
-}
+```
+NotFound()     → HTTP 404
+NoPermission() → HTTP 403
+有 ErrorCode() → HTTP 400
+其他           → HTTP 500
 ```
 
 Handler 层统一写法：
 
 ```go
 func (h *UserHandler) GetUser(c *gin.Context) {
+    id, err := controller.GetIndex(c)
+    if err != nil {
+        return
+    }
+
     traceID := c.GetString("trace_id")
-    user, err := h.service.GetUser(id)
+    user, err := h.service.GetUser(c.Request.Context(), id)
     if err != nil {
         logrus.WithFields(logrus.Fields{
             "trace_id": traceID,
             "error":    err.Error(),
         }).Error("get user failed")
-        SendError(c, err) // 内部处理状态码和响应格式
+        controller.SendError(c, err) // 自动处理状态码和响应格式
         return
     }
-    SendRespOfGet(c, user)
+    controller.SendRespOfGet(c, user)
 }
 ```
 
