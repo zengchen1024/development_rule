@@ -224,6 +224,56 @@ controller.AddRouterForHeartbeatController(routerGroup)
 
 K8s 的 `livenessProbe` 和 `readinessProbe` 指向此路由。
 
+## API 文档同步
+
+使用 `swaggo/swag` 从代码注释自动生成 Swagger 文档，**每次新增、修改或删除接口后必须重新生成**。
+
+### 注释规范
+
+Handler 函数必须包含完整的 swag 注释：
+
+```go
+// @Summary		ListPods
+// @Description	list pod records of the current user in the past month
+// @Tags			Cloud
+// @Param			page_num		query	int	false	"page number (1-based)"
+// @Param			count_per_page	query	int	false	"items per page"
+// @Accept			json
+// @Success		200	{object}	app.UserPodsDTO
+// @Failure		400	{object}	responseData	"bad request"
+// @Failure		500	{object}	responseData	"system error"
+// @Router			/v1/cloud/pod/history [get]
+```
+
+### 生成命令
+
+在项目根目录执行：
+
+```bash
+swag init
+```
+
+生成产物为 `docs/docs.go`、`docs/swagger.json`、`docs/swagger.yaml`，**三个文件必须一并提交**。
+
+### 工具版本
+
+项目使用 `github.com/swaggo/swag` v1.16.x，`go.mod` 中锁定版本。本地安装：
+
+```bash
+go install github.com/swaggo/swag/cmd/swag@$(grep swaggo/swag go.mod | awk '{print $2}')
+```
+
+> **注意**：v1.16.2 存在解析特定注释时 panic 的 bug，请使用 v1.16.4 及以上版本。
+
+### CI 检查（推荐）
+
+在 CI 流水线中加入文档一致性检查，防止接口改动未同步文档：
+
+```bash
+swag init
+git diff --exit-code docs/
+```
+
 ## 安全响应头
 
 **所有接口必须设置安全响应头**，使用框架中间件：
