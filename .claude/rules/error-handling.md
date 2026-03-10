@@ -30,14 +30,16 @@ const (
     errorCodeNoPermission = "no_permission"
 
     // 对外暴露（大写开头，供其他包引用）
-    ErrorCodeUserNotFound      = "user_not_found"
-    ErrorCodeUserNoPermission  = "user_no_permission"
-    ErrorCodeOrderCreateFailed = "order_create_failed"
+    ErrorCodeUserNotFound         = "user_not_found"
+    ErrorCodeUserNoPermission     = "user_no_permission"
+    ErrorCodeUserAlreadyExists    = "user_already_exists"
+    ErrorCodeUserConcurrentUpdate = "user_concurrent_update"
 )
 ```
 
 - 内部错误码（`errorCode` 前缀）：包内使用，不跨包引用
 - 对外错误码（`ErrorCode` 前缀）：供 App 层或 Controller 层引用
+- **只为有业务含义的错误定义错误码**，系统错误（如 DB 连接失败）不定义错误码
 
 ## 三种特定错误类型
 
@@ -70,65 +72,83 @@ func New(code, msg string, err error) error
 
 ## Repository 层错误处理
 
-Repository 层返回以下底层错误类型（来自 `go-ddd-framework/repository` 包），不使用 allerror：
+Repository 层返回以下三种"可预期"错误类型（来自 `go-ddd-framework/repository` 包），不使用 allerror：
 
 ```go
-type ErrorResourceNotFound struct{ error }
-type ErrorDuplicateCreating struct{ error }
-type ErrorConcurrentUpdating struct{ error }
+type ErrorResourceNotFound struct{ error }   // Find 时资源不存在
+type ErrorDuplicateCreating struct{ error }   // Create 时唯一约束冲突
+type ErrorConcurrentUpdating struct{ error }  // Save/Delete 时乐观锁冲突
 ```
 
-App 层负责将底层错误**显式转换**为业务错误：
+**App 层只需转换"需要改变 HTTP 语义"的错误**。三种可预期错误若不转换，Controller 会把它们映射为 HTTP 500（系统错误），而实际应返回 404/400，因此必须显式转换。其他所有错误（如 DB 连接失败）本就是系统错误，直接返回即可，Controller 自动映射为 HTTP 500。
+
+### 按操作类型的处理约定
+
+**Find（查询单条）**：检查 `IsErrorResourceNotFound`，其余直接返回
 
 ```go
-// ✅ 正确：显式转换，保留调用链
-func (s *UserService) CreateUser(ctx context.Context, v *domain.User) error {
-    err := s.repo.Add(ctx, v)
-    if err != nil {
-        if repository.IsErrorDuplicateCreating(err) {
-            return allerror.New(ErrorCodeUserAlreadyExists, "", err)
-        }
-        return allerror.New("user_create_failed", "", err)
-    }
-    return nil
-}
-
-func (s *UserService) UpdateUser(ctx context.Context, v *domain.User) error {
-    err := s.repo.Save(ctx, v)
-    if err != nil {
-        if repository.IsErrorConcurrentUpdating(err) {
-            // 并发冲突属于业务异常，返回 400
-            return allerror.New("user_concurrent_update", "please retry", err)
-        }
-        return allerror.New("user_update_failed", "", err)
-    }
-    return nil
-}
-
 func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, error) {
     user, err := s.repo.Find(ctx, id)
     if err != nil {
         if repository.IsErrorResourceNotFound(err) {
             return nil, allerror.NewNotFoundError(ErrorCodeUserNotFound, "", err)
         }
-        return nil, allerror.New("user_query_failed", "", err)
+        return nil, err // 系统错误，Controller → HTTP 500
     }
     return user, nil
 }
+```
 
-// ❌ 禁止：直接透传底层错误
-func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, error) {
-    return s.repo.Find(ctx, id) // 不要这样
+**Create（创建）**：检查 `IsErrorDuplicateCreating`，其余直接返回
+
+```go
+func (s *UserService) CreateUser(ctx context.Context, v *domain.User) error {
+    err := s.repo.Add(ctx, v)
+    if err != nil {
+        if repository.IsErrorDuplicateCreating(err) {
+            return allerror.New(ErrorCodeUserAlreadyExists, "", err) // HTTP 400
+        }
+        return err // 系统错误，Controller → HTTP 500
+    }
+    return nil
 }
 ```
 
-**三类底层错误的业务映射：**
+**Save/Delete（更新或删除）**：检查 `IsErrorConcurrentUpdating`，其余直接返回
 
-| 底层错误 | 含义 | allerror 类型 | HTTP |
-|----------|------|--------------|------|
-| `ErrorResourceNotFound` | 数据不存在 | `NewNotFoundError` | 404 |
-| `ErrorDuplicateCreating` | 唯一约束冲突 | `New`（业务码） | 400 |
-| `ErrorConcurrentUpdating` | 乐观锁冲突 | `New`（业务码） | 400 |
+```go
+func (s *UserService) UpdateUser(ctx context.Context, v *domain.User) error {
+    err := s.repo.Save(ctx, v)
+    if err != nil {
+        if repository.IsErrorConcurrentUpdating(err) {
+            return allerror.New(ErrorCodeUserConcurrentUpdate, "please retry", err) // HTTP 400
+        }
+        return err // 系统错误，Controller → HTTP 500
+    }
+    return nil
+}
+```
+
+**List（列表查询）**：不存在可预期的业务错误，直接返回
+
+```go
+func (s *UserService) ListUsers(ctx context.Context, cmd *CmdToListUsers) (UsersDTO, error) {
+    items, total, err := s.repo.List(ctx, cmd)
+    if err != nil {
+        return UsersDTO{}, err // 系统错误，Controller → HTTP 500
+    }
+    // ... 转换为 DTO
+}
+```
+
+**三类可预期错误的转换对照：**
+
+| 底层错误 | 触发操作 | 转换为 | HTTP |
+|----------|---------|--------|------|
+| `ErrorResourceNotFound` | Find | `allerror.NewNotFoundError(code, "", err)` | 404 |
+| `ErrorDuplicateCreating` | Create | `allerror.New(code, "", err)` | 400 |
+| `ErrorConcurrentUpdating` | Save/Delete | `allerror.New(code, "", err)` | 400 |
+| 其他（系统错误） | 任何操作 | 直接 `return err` | 500 |
 
 ## Controller 层错误响应
 
@@ -174,4 +194,5 @@ func (h *UserHandler) GetUser(c *gin.Context) {
 - 不得 `_ = someFunc()` 忽略错误返回值
 - 不得仅打印错误而不返回（`log.Error(err); return nil`）
 - 不得在错误信息中包含用户输入的原始内容（防止日志注入）
-- 不得跨越层级直接抛出底层错误（如把数据库错误直接返回到 Controller）
+- 不得为系统错误伪造业务错误码（如 `allerror.New("user_query_failed", ...)` 包装 DB 连接错误）——系统错误直接返回，Controller 映射为 HTTP 500
+- 不得遗漏可预期业务错误的转换（Find 时 `IsErrorResourceNotFound`、Create 时 `IsErrorDuplicateCreating`、Save/Delete 时 `IsErrorConcurrentUpdating` 必须检查）

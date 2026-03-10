@@ -153,16 +153,14 @@ func (impl *userImpl) Add(ctx context.Context, v *domain.User) error {
     return nil
 }
 
-// App 层：转换为 allerror 定义的业务错误
+// App 层：只转换需要改变 HTTP 语义的错误，系统错误直接返回
 func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, error) {
     user, err := s.repo.Find(ctx, id)
     if err != nil {
         if repository.IsErrorResourceNotFound(err) {
-            return nil, allerror.NewNotFoundError(
-                allerror.ErrorCodeUserNotFound, "", err,
-            )
+            return nil, allerror.NewNotFoundError(ErrorCodeUserNotFound, "", err) // → HTTP 404
         }
-        return nil, allerror.New("user_query_failed", "", err)
+        return nil, err // 系统错误，Controller → HTTP 500
     }
     return user, nil
 }
@@ -171,7 +169,7 @@ func (s *UserService) GetUser(ctx context.Context, id int64) (*domain.User, erro
 **分层职责**：
 - **DAO 层**：只负责数据库操作，返回 GORM 原始错误
 - **Repository 层**：转换为领域层通用错误（`ErrorResourceNotFound`、`ErrorDuplicateCreating`、`ErrorConcurrentUpdating`）；使用 `dao.IsRecordExists(err)` 检测 UNIQUE 冲突
-- **App 层**：转换为业务错误（`allerror`），添加业务错误码和用户友好的错误信息
+- **App 层**：只转换三种可预期错误（改变 HTTP 状态码），其余错误直接返回（Controller 映射为 HTTP 500）
 
 ## 并发控制规范
 
