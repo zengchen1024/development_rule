@@ -504,6 +504,8 @@ import (
     "your-project/config"
 )
 
+const waitServerStart = 3 // 秒，等待服务完成 TLS 握手后再删证书
+
 type ServerOptions struct {
     Port        int
     Cert        string           // TLS 证书路径，空字符串表示使用 HTTP
@@ -514,6 +516,24 @@ type ServerOptions struct {
 
 func (opt *ServerOptions) needTLS() bool {
     return opt.Key != "" && opt.Cert != ""
+}
+
+// clean 在 TLS 服务启动后删除证书和密钥文件，防止敏感文件驻留磁盘
+// 仅当 RemoveCfg=true 时执行（对应 K8s Secret 挂载场景）
+func (opt *ServerOptions) clean() {
+    if !opt.RemoveCfg {
+        return
+    }
+
+    time.Sleep(time.Duration(waitServerStart) * time.Second)
+
+    if err := os.Remove(opt.Cert); err != nil {
+        logrus.Fatalf("remove cert file: %s", err.Error())
+    }
+
+    if err := os.Remove(opt.Key); err != nil {
+        logrus.Fatalf("remove key file: %s", err.Error())
+    }
 }
 
 // StartWebServer 初始化服务并启动，内置优雅关闭
@@ -563,12 +583,7 @@ func StartWebServer(opt *ServerOptions, cfg *config.Config) {
     }
     interrupts.ListenAndServeTLS(srv, opt.Cert, opt.Key, opt.GracePeriod)
 
-    // 启动后删除证书文件（仅 K8s Secret 挂载场景需要）
-    if opt.RemoveCfg {
-        time.Sleep(3 * time.Second) // 等待服务完成 TLS 握手后再删
-        _ = os.Remove(opt.Cert)
-        _ = os.Remove(opt.Key)
-    }
+    opt.clean()
 }
 
 // logRequest 记录每个请求的基本信息，心跳请求不记录

@@ -73,6 +73,20 @@ readinessProbe:
 - 密钥通过 `Secret` 注入，不得明文出现在任何 YAML 文件中
 - 不得将 `Secret` 提交到 git 仓库
 
+### 敏感文件启动后清理
+
+K8s Secret 以文件方式挂载后，服务读取完毕必须立即删除，防止敏感内容驻留磁盘。通过 `--rm-config` 参数启用，分两个阶段执行：
+
+| 阶段 | 文件 | 时机 | 实现位置 |
+|------|------|------|---------|
+| 1 | YAML 配置文件 | 解析完成后立即删除（`defer os.Remove`） | `config.LoadConfig` |
+| 2 | TLS 证书和密钥 | 服务启动后等待 `waitServerStart`（3s）再删 | `ServerOptions.clean()` |
+
+**约束：**
+- `clean()` 必须在 `interrupts.ListenAndServeTLS()` 之后调用，不得省略
+- 删除失败时必须 `logrus.Fatal`，不得静默忽略（`_ = os.Remove(...)` 是错误写法）
+- 等待时间 `waitServerStart` 不得缩短，确保 TLS 握手完成后再删证书
+
 ### 标签规范
 
 所有资源必须包含以下标签：
