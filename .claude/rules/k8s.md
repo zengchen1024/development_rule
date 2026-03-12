@@ -10,27 +10,88 @@ paths:
 
 ## Dockerfile 规范
 
-```dockerfile
-# 必须使用多阶段构建
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
+### 多阶段构建模板
 
-FROM alpine:3.19
-# 不得使用 root 用户运行
-RUN addgroup -S app && adduser -S app -G app
+```dockerfile
+# ── 阶段一：编译 ──────────────────────────────────────────────────
+# 项目中必须指定具体版本号，禁止省略 tag
+FROM openeuler/openeuler:<version> AS BUILDER
+
+RUN dnf update -y && \
+    dnf install -y wget tar gcc && \
+    wget https://mirrors.aliyun.com/golang/go1.24.1.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go1.24.1.linux-amd64.tar.gz && \
+    export PATH=$PATH:/usr/local/go/bin && \
+    go env -w GOPROXY=https://goproxy.cn,direct
+
+COPY . /go/src/github.com/opensourceways/<service>
+
+# 必须启用 PIE + RELRO + 去掉符号表，增强二进制安全性
+RUN cd /go/src/github.com/opensourceways/<service> && \
+    GO111MODULE=on /usr/local/go/bin/go build \
+        -o <binary_name> \
+        -buildmode=pie \
+        --ldflags "-s -linkmode 'external' -extldflags '-Wl,-z,now'"
+
+# ── 阶段二：运行时镜像 ────────────────────────────────────────────
+# 项目中必须指定具体版本号，禁止省略 tag
+FROM openeuler/openeuler:<version>
+
+# 创建固定 UID/GID 的非 root 用户（禁止登录 shell）
+RUN groupadd -g 1000 app && \
+    useradd -u 1000 -g app -s /sbin/nologin -m app
+
+# 清除系统 banner，避免泄露版本信息
+RUN echo > /etc/issue && echo > /etc/issue.net && echo > /etc/motd
+
+# 设置家目录权限（仅 owner 可访问）
+RUN mkdir -p /home/app && \
+    chmod 700 /home/app && \
+    chown app:app /home/app
+
+# 禁止 root 历史记录；设置密码最长有效期
+RUN echo 'set +o history' >> /root/.bashrc && \
+    sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
+
+# 删除调试工具和无用文件，减小攻击面
+RUN rm -rf /tmp/* \
+    /usr/share/gdb \
+    /usr/share/licenses/glibc
+
 USER app
-WORKDIR /app
-COPY --from=builder /app/server .
-ENTRYPOINT ["./server"]
+WORKDIR /home/app
+
+# 拷贝时指定 chown，避免文件属主为 root
+COPY --chown=app:app --from=BUILDER \
+    /go/src/github.com/opensourceways/<service>/<binary_name> \
+    /home/app/<binary_name>
+
+# 可执行文件：owner 可读可执行，group 可读可执行，other 无权限
+RUN chmod 550 /home/app/<binary_name>
+
+# shell 配置：禁用历史记录，设置 umask 027（新建文件默认 640/750）
+RUN chmod 640 /home/app/.bash* && \
+    echo "umask 027"      >> /home/app/.bashrc && \
+    echo 'set +o history' >> /home/app/.bashrc
+
+ENTRYPOINT ["/home/app/<binary_name>"]
 ```
 
-- 基础镜像必须固定版本 tag，禁止使用 `latest`
-- 最终镜像不得包含编译工具链（必须多阶段构建）
-- 不得将配置文件或密钥打包进镜像
+### 强制要求
+
+| 要求 | 说明 |
+|------|------|
+| 基础镜像 | 统一使用 `openeuler/openeuler`；项目 Dockerfile 中必须指定具体版本 tag，禁止省略或使用 `latest` |
+| 多阶段构建 | 最终镜像不得包含编译工具链（go、gcc、wget 等） |
+| 非 root 用户 | 必须创建固定 UID/GID（推荐 1000）的专用用户，`-s /sbin/nologin` 禁止登录 |
+| 可执行文件权限 | `chmod 550`（owner/group 可读可执行，other 无权限） |
+| 其他文件权限 | `.bash*` 等配置文件 `chmod 640`；工作目录 `chmod 700` |
+| COPY 指定属主 | `COPY --chown=app:app`，禁止 COPY 后文件属主为 root |
+| 删除调试工具 | 必须删除 `/usr/share/gdb` 等调试组件及 `/tmp/*` |
+| 清除系统 banner | 清空 `/etc/issue`、`/etc/issue.net`、`/etc/motd` |
+| Shell 安全配置 | `.bashrc` 中写入 `set +o history`（禁止历史记录）和 `umask 027` |
+| 编译安全选项 | 必须使用 `-buildmode=pie` + `"-s -linkmode 'external' -extldflags '-Wl,-z,now'"` |
+| 禁止打包密钥 | 不得将配置文件、证书、密钥打包进镜像，通过 K8s Secret/ConfigMap 挂载 |
 
 ## K8s 资源规范
 
