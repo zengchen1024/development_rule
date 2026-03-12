@@ -48,3 +48,4 @@
 - [GORM 操作](`.claude/rules/gorm.md`)
 - [测试规范](`.claude/rules/testing.md`)
 - [K8s 部署](`.claude/rules/k8s.md`)
+- [Pull Request 规范](`.claude/rules/pull-request.md`)
