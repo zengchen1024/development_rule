@@ -213,16 +213,43 @@ type OrdersDTO struct {
 
 ## 心跳检查路由
 
-每个服务必须注册心跳路由，直接使用框架函数：
+每个服务必须注册心跳路由，**注册在独立路由组**（与业务接口隔离），直接使用框架函数：
 
 ```go
 import "github.com/opensourceways/go-ddd-framework/controller"
 
-// 注册 GET /v1/heartbeat，响应 {"data":{"status":"good"},...}
-controller.AddRouterForHeartbeatController(routerGroup)
+// server/router.go
+// 心跳接口注册在 /internal 前缀，与业务接口分组隔离
+func setInternalRouter(prefix string, engine *gin.Engine, ...) {
+    rg := engine.Group(prefix)
+    controller.AddRouterForHeartbeatController(rg) // GET /internal/v1/heartbeat
+}
 ```
 
 K8s 的 `livenessProbe` 和 `readinessProbe` 指向此路由。
+
+### 心跳接口访问频率配置
+
+心跳接口的访问频率通过 `ratelimiter.Config` 单独配置，在 `rate_limit` 列表中为其指定独立限流规则：
+
+```yaml
+# config.yaml
+common:
+  rate_limiter:
+    rate_limit:
+      - route: "/internal/v1/heartbeat"
+        burst_num: 1    # 瞬时最大突发请求数
+        request_num: 20 # 每秒最大请求数
+```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `route` | — | 路由前缀，精确匹配请求 URI |
+| `request_num` | 500 | 每秒最大请求数（令牌桶补充速率） |
+| `burst_num` | 100 | 瞬时突发允许量（令牌桶容量） |
+
+- 不配置时，心跳接口使用 `default` 规则（`request_num: 500`，`burst_num: 100`）
+- 心跳接口流量由 K8s 探针产生，`request_num` 建议设为探针频率的 2-3 倍
 
 ## API 文档同步
 

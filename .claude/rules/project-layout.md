@@ -379,6 +379,24 @@ services.orderApp = app.NewOrderAppService(repo, tx)
 
 ## 启动代码模板
 
+### 命令行参数规范
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `--port` | int | 否 | 监听端口，默认 8888 |
+| `--config-file` | string | **是** | 配置文件路径，启动时校验非空 |
+| `--tls-cert` | string | 否 | TLS 证书文件路径，为空时使用 HTTP |
+| `--tls-key` | string | 否 | TLS 私钥文件路径 |
+| `--grace-period` | duration | 否 | 优雅关闭等待时长，默认 180s |
+| `--rm-config` | bool | 否 | 启动后删除配置文件（K8s Secret 挂载场景） |
+| `--enable-debug` | bool | 否 | 开启 Debug 日志级别 |
+
+**约束：**
+- 通过 `options` struct 集中管理，提供 `addFlags()` 和 `validate()` 方法，不得散放在 `main()` 中
+- `validate()` 必须校验 `--config-file` 非空，缺失则报错退出
+- **禁止使用 `os.Getenv()` 读取任何配置**（含敏感信息），所有配置统一通过 `--config-file` 指定的文件传递
+- 配置文件在 K8s 场景下通过 Secret 挂载，启动后由 `--rm-config` 控制是否删除
+
 ### main.go
 
 ```go
@@ -386,6 +404,8 @@ package main
 
 import (
     "flag"
+    "fmt"
+    "os"
     "time"
 
     "github.com/sirupsen/logrus"
@@ -393,36 +413,72 @@ import (
     "your-project/server"
 )
 
-func main() {
-    // 1. 解析命令行参数
-    var (
-        port        = flag.Int("port", 8080, "server port")
-        configFile  = flag.String("config-file", "config/config.yaml", "config file path")
-        tlsCertFile = flag.String("tls-cert-file", "", "TLS cert file path (empty = HTTP)")
-        tlsKeyFile  = flag.String("tls-key-file", "", "TLS key file path")
-        removeCfg   = flag.Bool("remove-config", false, "remove config file after loading")
-        gracePeriod = flag.Duration("grace-period", 180*time.Second, "graceful shutdown period")
+const (
+    defaultPort        = 8888
+    defaultGracePeriod = 180 // 秒
+)
+
+type options struct {
+    server      server.ServerOptions
+    configFile  string
+    removeCfg   bool
+    enableDebug bool
+}
+
+// validate 校验必填参数，并将 removeCfg 同步到 ServerOptions
+func (o *options) validate() error {
+    if o.configFile == "" {
+        return fmt.Errorf("missing --config-file")
+    }
+    o.server.RemoveCfg = o.removeCfg
+    return nil
+}
+
+func (o *options) addFlags(fs *flag.FlagSet) {
+    fs.IntVar(&o.server.Port, "port", defaultPort, "port to listen on")
+    fs.StringVar(&o.server.Cert, "tls-cert", "", "TLS cert file path (empty = HTTP)")
+    fs.StringVar(&o.server.Key, "tls-key", "", "TLS key file path")
+    fs.DurationVar(
+        &o.server.GracePeriod, "grace-period",
+        time.Duration(defaultGracePeriod)*time.Second,
+        "graceful shutdown wait duration",
     )
-    flag.Parse()
+    fs.StringVar(&o.configFile, "config-file", "", "path to config file (required)")
+    fs.BoolVar(&o.removeCfg, "rm-config", false, "delete config file after loading")
+    fs.BoolVar(&o.enableDebug, "enable-debug", false, "enable debug log level")
+}
 
-    // 2. 初始化日志（必须最先执行）
-    logrus.SetFormatter(&logrus.JSONFormatter{})
-    logrus.SetLevel(logrus.InfoLevel)
+func gatherOptions(fs *flag.FlagSet, args ...string) (options, error) {
+    var o options
+    o.addFlags(fs)
+    if err := fs.Parse(args); err != nil {
+        return o, err
+    }
+    return o, o.validate()
+}
 
-    // 3. 加载配置
-    var cfg config.Config
-    if err := config.LoadConfig(*configFile, &cfg, *removeCfg); err != nil {
-        logrus.WithField("error", err.Error()).Fatal("load config failed")
+func main() {
+    o, err := gatherOptions(
+        flag.NewFlagSet(os.Args[0], flag.ExitOnError),
+        os.Args[1:]...,
+    )
+    if err != nil {
+        logrus.Errorf("invalid options: %s", err.Error())
+        return
     }
 
-    // 4. 启动服务（含优雅关闭）
-    server.StartWebServer(&server.ServerOptions{
-        Port:        *port,
-        Cert:        *tlsCertFile,
-        Key:         *tlsKeyFile,
-        RemoveCfg:   *removeCfg,
-        GracePeriod: *gracePeriod,
-    }, &cfg)
+    logrus.SetFormatter(&logrus.JSONFormatter{})
+    if o.enableDebug {
+        logrus.SetLevel(logrus.DebugLevel)
+    }
+
+    cfg := new(config.Config)
+    if err := config.LoadConfig(o.configFile, cfg, o.removeCfg); err != nil {
+        logrus.Errorf("load config failed: %s", err.Error())
+        return
+    }
+
+    server.StartWebServer(&o.server, cfg)
 }
 ```
 
